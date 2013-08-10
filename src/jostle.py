@@ -9,6 +9,9 @@ import psmove
 import time
 
 
+CELEBRATION_DURATION = 10
+
+
 class JostleState(object):
     def __init__(self, player):
         print "[%d] -> %s" % (player.id, self.__class__.__name__)
@@ -16,7 +19,7 @@ class JostleState(object):
         self.player = player
         self.player.move.set_rumble(0)  # cancel rumbles when changing state
 
-    def tick(self, dt, now):
+    def tick(self, now):
         self.player.set_color(255, 255, 255)
         return True
 
@@ -24,9 +27,9 @@ class JostleState(object):
 class JostleStatePending(JostleState):
     def __init__(self, player):
         super(JostleStatePending, self).__init__(player)
-        player.rumble(1.5)
+        player.rumble(0.5)
 
-    def tick(self, dt, now):
+    def tick(self, now):
         # make the light breathe while in a pending state
         c = math.sin(now) * 115 + 140
         self.player.set_color(c * 0.3, c, c * 0.3)
@@ -37,18 +40,18 @@ class JostleStatePending(JostleState):
 
 
 class JostleStateTimedout(JostleState):
-    def tick(self, dt, now):
+    def tick(self, now):
         self.player.set_color(0, 0, 0)
 
 
 # Do nothing state
 class JostleStateNothing(JostleState):
-    def tick(self, dt, now):
+    def tick(self, now):
         pass
 
 
 class JostleStateReady(JostleState):
-    def tick(self, dt, now):
+    def tick(self, now):
         # Go green for ready state, until game has enough players
         self.player.set_color(0, 255, 0)
 
@@ -61,15 +64,15 @@ class JostleStateAlive(JostleState):
 
     def __init__(self, player):
         super(JostleStateAlive, self).__init__(player)
-        self._high_threshold = 3.0
+        self._high_threshold = 2.2
         self._medium_threshold = 1.7
         self._warn_timeout = 0
 
-    def _get_color(self, now, dt):
-        # Blue, if in warning state
+    def _get_color(self, now):
+        # Red, if in warning state
         if self._warn_timeout > now:
             self._warn_timeout = 0
-            return (255, 0, 0)
+            return (180, 0, 0)
 
         # Rainbow mode if celebrating a win
         if self.player.winner:
@@ -88,18 +91,18 @@ class JostleStateAlive(JostleState):
                 def mix(idx):
                     return int(a[idx] * (1. - x) + b[idx] * float(x))
                 return (mix(0), mix(1), mix(2))
-            col1 = int(now % len(colors))
+            col1 = int((now * 5) % len(colors))
             col2 = int((col1 + 1) % len(colors))
             return blend(colors[col1], colors[col2])
 
         # Solid white if just playing normally
         return (255, 255, 255)
 
-    def tick(self, dt, now):
-        self.player.set_color(*self._get_color(now, dt))
+    def tick(self, now):
+        self.player.set_color(*self._get_color(now))
 
         if not self.player.winner:
-            m = self.tick_detect_movement(dt, time)
+            m = self.tick_detect_movement(time)
 
             if(m == self.__class__.MEDIUM):  # warn user about movement..
                 #print "JOSTLE WARNING FOR %d" % self.player.id
@@ -108,8 +111,14 @@ class JostleStateAlive(JostleState):
             if(m == self.__class__.HIGH):
                 #print "JOSTLE DEATH FOR %d" % self.player.id
                 self.player.set_state(JostleStateDead)
+        else:
+            # winner -> rumble a bit
+            if now % 1 > 0.8:
+                self.player.move.set_rumble(100)
+            else:
+                self.player.move.set_rumble(0)
 
-    def tick_detect_movement(self, dt, time):
+    def tick_detect_movement(self, time):
         ax, ay, az = self.player.move.get_accelerometer_frame(psmove.Frame_SecondHalf)
         av = abs(ax) + abs(ay) + abs(az)
 
@@ -126,9 +135,8 @@ class JostleStateDead(JostleState):
     def __init__(self, player):
         super(JostleStateDead, self).__init__(player)
         player.rumble(3)
-        player.set_color(255, 0, 0)
 
-    def tick(self, dt, now):
+    def tick(self, now):
         elapsed = now - self.starttime
         # red for 5 seconds
         if elapsed < 5.0:
@@ -171,18 +179,22 @@ class JostlePlayer:
         return self.state.__class__ == JostleStateDead
 
     def rumble(self, secs):
-        self.rumble_expiry = time.time() + secs
+        now = time.time()
+        self.rumble_expiry = now + secs
         self.move.set_rumble(100)
 
-    def tick(self, dt, now):
+    def tick(self, now):
         self._now = now
 
         if self.move.poll():
-            self.state.tick(dt, now)
+            self.state.tick(now)
 
-        if(self.rumble_expiry != 0 and self.rumble_expiry > now):
-            self.rumble_expiry = 0
-            self.move.set_rumble(0)
+        if self.rumble_expiry != 0:
+            if self.rumble_expiry < now:
+                self.rumble_expiry = 0
+                self.move.set_rumble(0)
+            else:
+                self.move.set_rumble(100)
 
         ## This also prods the move controller to apply rumble settings etc
         self.move.update_leds()
@@ -214,8 +226,6 @@ class JostleGame:
 
     def tick(self):
         self.now = time.time()
-        self.dt = self.now - self.lasttime
-        self.timer = self.timer + self.dt
         self.lasttime = self.now
 
         if self.state == self.__class__.INIT:
@@ -227,7 +237,7 @@ class JostleGame:
                 timeready = True
 
             for p in self.players:
-                p.tick(self.dt, self.now)
+                p.tick(self.now)
                 st = p.state.__class__
                 if st == JostleStateReady:
                     numready = numready + 1
@@ -247,6 +257,7 @@ class JostleGame:
                 self.starting_expiry = time.time() + 2
                 for p in self.gameplayers:
                     p.set_state(JostleStateNothing)
+                    p.rumble(0.5)
 
         if self.state == self.__class__.STARTING:
             if time.time() > self.starting_expiry:
@@ -258,12 +269,12 @@ class JostleGame:
                 c = int(pc * pc * pc * 255)
                 for p in self.players:
                     p.set_color(c, 255, c)
-                    p.tick(self.dt, self.now)
+                    p.tick(self.now)
 
         if self.state == self.__class__.PLAYING:
             # Update state of all players
             for p in self.gameplayers:
-                p.tick(self.dt, self.now)
+                p.tick(self.now)
 
             # Check winning conditions
             ap = [player for player in self.gameplayers if not player.is_dead()]
@@ -275,7 +286,7 @@ class JostleGame:
                 winner = self.aliveplayers[0]
                 winner.set_winner()
                 print "*** WINNER DETECTED id: %d" % winner.id
-                self.ending_timeout = time.time() + 15
+                self.ending_timeout = time.time() + CELEBRATION_DURATION
                 self.state = self.__class__.ENDING
 
         if self.state == self.__class__.ENDING:
@@ -288,7 +299,7 @@ class JostleGame:
             else:
                 # Still waiting for celebrations to finish
                 for p in self.players:
-                    p.tick(self.dt, self.now)
+                    p.tick(self.now)
             return True
 
 
